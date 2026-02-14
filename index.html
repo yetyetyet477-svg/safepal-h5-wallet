@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>SafePal H5 Wallet (WalletConnect)</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+          "Apple Color Emoji", "Segoe UI Emoji";
+        margin: 0;
+        padding: 16px;
+        line-height: 1.35;
+      }
+      .card {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 16px;
+        border: 1px solid rgba(127, 127, 127, 0.35);
+        border-radius: 12px;
+      }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      h2 { font-size: 14px; margin: 16px 0 8px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+      button {
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(127,127,127,.35);
+        background: transparent;
+        cursor: pointer;
+      }
+      button.primary { background: #2563eb; color: white; border-color: #2563eb; }
+      button:disabled { opacity: .55; cursor: not-allowed; }
+      input, select {
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(127,127,127,.35);
+        background: transparent;
+        min-width: 220px;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(127,127,127,.35);
+        margin-top: 12px;
+      }
+      .muted { opacity: .8; font-size: 12px; }
+      .kv {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .kv div {
+        padding: 6px 0;
+        border-bottom: 1px dashed rgba(127,127,127,.25);
+      }
+      .kv .k { opacity: .75; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    </style>
+  </head>
+
+  <body>
+    <div class="card">
+      <h1>SafePal H5 Wallet (WalletConnect v2)</h1>
+      <div class="muted">
+        This page does <b>not</b> store private keys. It connects to SafePal (or any WalletConnect wallet)
+        and requests signatures/transactions.
+      </div>
+
+      <div class="row" style="margin-top: 14px;">
+        <button id="btnConnect" class="primary">Connect</button>
+        <button id="btnDisconnect" disabled>Disconnect</button>
+
+        <select id="chainSelect" title="Chain">
+          <option value="56">BSC (56)</option>
+          <option value="1">Ethereum (1)</option>
+          <option value="137">Polygon (137)</option>
+        </select>
+
+        <button id="btnSwitch" disabled>Switch chain</button>
+        <button id="btnRefresh" disabled>Refresh</button>
+      </div>
+
+      <div class="kv">
+        <div class="k">Status</div><div id="status">Not connected</div>
+        <div class="k">Address</div><div id="address">—</div>
+        <div class="k">Chain</div><div id="chain">—</div>
+        <div class="k">Balance</div><div id="balance">—</div>
+      </div>
+
+      <h2>Send native token</h2>
+      <div class="row">
+        <input id="to" placeholder="To address (0x...)" />
+        <input id="amount" placeholder="Amount (e.g. 0.001)" />
+        <button id="btnSend" disabled>Send</button>
+      </div>
+
+      <h2>Sign message</h2>
+      <div class="row">
+        <input id="msg" placeholder="Message to sign" value="Hello from SafePal H5" />
+        <button id="btnSign" disabled>Sign</button>
+      </div>
+
+      <pre id="log"></pre>
+
+      <div class="muted" style="margin-top: 10px;">
+        Tip: you must run this page over <code>http://localhost</code> or <code>https://</code> (not <code>file://</code>).
+      </div>
+    </div>
+
+    <script type="module">
+      import EthereumProvider from "https://esm.sh/@walletconnect/ethereum-provider@2.16.1?bundle&target=es2020";
+      import { ethers } from "https://esm.sh/ethers@6.13.5?bundle&target=es2020";
+
+      // ====== CONFIG ======
+      // Create one at: https://cloud.walletconnect.com
+      const WC_PROJECT_ID = "YOUR_WC_PROJECT_ID_HERE";
+
+      const CHAIN_INFO = {
+        56: {
+          name: "BSC Mainnet",
+          chainIdHex: "0x38",
+          nativeSymbol: "BNB",
+          rpcUrl: "https://bsc-dataseed.binance.org",
+          explorer: "https://bscscan.com"
+        },
+        1: {
+          name: "Ethereum Mainnet",
+          chainIdHex: "0x1",
+          nativeSymbol: "ETH",
+          rpcUrl: "https://rpc.ankr.com/eth",
+          explorer: "https://etherscan.io"
+        },
+        137: {
+          name: "Polygon",
+          chainIdHex: "0x89",
+          nativeSymbol: "MATIC",
+          rpcUrl: "https://polygon-rpc.com",
+          explorer: "https://polygonscan.com"
+        }
+      };
+
+      // ====== UI helpers ======
+      const $ = (id) => document.getElementById(id);
+      const logEl = $("log");
+      const log = (...args) => {
+        const line = args
+          .map((a) => (typeof a === "string" ? a : JSON.stringify(a, null, 2)))
+          .join(" ");
+        logEl.textContent = (line + "\n\n" + logEl.textContent).slice(0, 12000);
+      };
+
+      const setStatus = (s) => ($("status").textContent = s);
+      const setAddr = (a) => ($("address").textContent = a || "—");
+      const setChain = (c) => ($("chain").textContent = c || "—");
+      const setBal = (b) => ($("balance").textContent = b || "—");
+
+      const setConnectedUI = (connected) => {
+        $("btnConnect").disabled = connected;
+        $("btnDisconnect").disabled = !connected;
+        $("btnRefresh").disabled = !connected;
+        $("btnSwitch").disabled = !connected;
+        $("btnSend").disabled = !connected;
+        $("btnSign").disabled = !connected;
+      };
+
+      const selectedChainId = () => Number($("chainSelect").value);
+
+      // ====== state ======
+      let wcProvider = null; // EIP-1193
+      let browserProvider = null; // ethers.BrowserProvider
+      let signer = null;
+
+      async function initProvider() {
+        if (!WC_PROJECT_ID || WC_PROJECT_ID.includes("YOUR_WC_PROJECT_ID")) {
+          throw new Error(
+            "Set WC_PROJECT_ID in index.html (WalletConnect Cloud Project ID from https://cloud.walletconnect.com)."
+          );
+        }
+
+        const chainId = selectedChainId();
+        const rpcMap = Object.fromEntries(
+          Object.entries(CHAIN_INFO).map(([id, v]) => [Number(id), v.rpcUrl])
+        );
+
+        wcProvider = await EthereumProvider.init({
+          projectId: WC_PROJECT_ID,
+          chains: [chainId],
+          optionalChains: [56, 1, 137].filter((x) => x !== chainId),
+          rpcMap,
+          showQrModal: true,
+          methods: [
+            "eth_sendTransaction",
+            "eth_signTransaction",
+            "eth_signTypedData",
+            "personal_sign",
+            "eth_sign"
+          ],
+          events: ["chainChanged", "accountsChanged", "disconnect"]
+        });
+
+        wcProvider.on("accountsChanged", async (accounts) => {
+          log({ event: "accountsChanged", accounts });
+          await refresh();
+        });
+
+        wcProvider.on("chainChanged", async (chainIdHex) => {
+          log({ event: "chainChanged", chainIdHex });
+          await refresh();
+        });
+
+        wcProvider.on("disconnect", (err) => {
+          log({ event: "disconnect", err: err?.message || err });
+          setConnectedUI(false);
+          setStatus("Disconnected");
+          setAddr("—");
+          setChain("—");
+          setBal("—");
+          wcProvider = null;
+          browserProvider = null;
+          signer = null;
+        });
+      }
+
+      async function connect() {
+        setStatus("Connecting…");
+        if (!wcProvider) await initProvider();
+
+        const accounts = await wcProvider.request({ method: "eth_requestAccounts" });
+        if (!accounts || !accounts[0]) throw new Error("No account returned from wallet.");
+
+        browserProvider = new ethers.BrowserProvider(wcProvider);
+        signer = await browserProvider.getSigner();
+
+        setConnectedUI(true);
+        setStatus("Connected");
+        await refresh();
+      }
+
+      async function disconnect() {
+        try {
+          await wcProvider?.disconnect?.();
+        } finally {
+          setConnectedUI(false);
+          setStatus("Not connected");
+          setAddr("—");
+          setChain("—");
+          setBal("—");
+          wcProvider = null;
+          browserProvider = null;
+          signer = null;
+        }
+      }
+
+      async function refresh() {
+        if (!wcProvider) return;
+
+        const accounts = await wcProvider.request({ method: "eth_accounts" });
+        const addr = accounts?.[0] || null;
+
+        const chainIdHex = await wcProvider.request({ method: "eth_chainId" });
+        const chainId = parseInt(chainIdHex, 16);
+
+        setAddr(addr);
+        const ci = CHAIN_INFO[chainId];
+        setChain(ci ? `${ci.name} (${chainId})` : `${chainId} (${chainIdHex})`);
+
+        if (addr && browserProvider) {
+          const balWei = await browserProvider.getBalance(addr);
+          const sym = ci?.nativeSymbol ?? "";
+          setBal(`${ethers.formatEther(balWei)} ${sym}`.trim());
+        } else {
+          setBal("—");
+        }
+      }
+
+      async function switchChain() {
+        if (!wcProvider) throw new Error("Not connected.");
+
+        const target = selectedChainId();
+        const info = CHAIN_INFO[target];
+        if (!info) throw new Error("Unknown chain selected.");
+
+        try {
+          await wcProvider.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: info.chainIdHex }]
+          });
+        } catch (e) {
+          const msg = e?.message || "";
+          const code = e?.code;
+          const notAdded = code === 4902 || msg.toLowerCase().includes("unrecognized chain");
+          if (!notAdded) throw e;
+
+          await wcProvider.request({
+            method: "wallet_addEthereumChain",
+            params: [
+              {
+                chainId: info.chainIdHex,
+                chainName: info.name,
+                rpcUrls: [info.rpcUrl],
+                nativeCurrency: {
+                  name: info.nativeSymbol,
+                  symbol: info.nativeSymbol,
+                  decimals: 18
+                },
+                blockExplorerUrls: [info.explorer]
+              }
+            ]
+          });
+        }
+
+        await refresh();
+      }
+
+      async function sendTx() {
+        if (!signer) throw new Error("Not connected.");
+
+        const to = $("to").value.trim();
+        const amount = $("amount").value.trim();
+
+        if (!ethers.isAddress(to)) throw new Error("Invalid 'to' address.");
+        if (!amount || Number(amount) <= 0) throw new Error("Invalid amount.");
+
+        const tx = {
+          to,
+          value: ethers.parseEther(amount)
+        };
+
+        setStatus("Sending… confirm in wallet");
+        log({ action: "sendTransaction", tx });
+
+        const resp = await signer.sendTransaction(tx);
+        log({ txHash: resp.hash });
+
+        setStatus("Waiting for confirmation…");
+        await resp.wait();
+
+        setStatus("Confirmed");
+        await refresh();
+      }
+
+      async function signMessage() {
+        if (!signer) throw new Error("Not connected.");
+        const msg = $("msg").value;
+
+        setStatus("Signing… confirm in wallet");
+        const sig = await signer.signMessage(msg);
+        log({ action: "signMessage", msg, signature: sig });
+        setStatus("Signed");
+      }
+
+      // ====== wire UI ======
+      $("btnConnect").addEventListener("click", async () => {
+        try {
+          await connect();
+        } catch (e) {
+          setStatus("Connect failed");
+          log({ error: e?.message || String(e) });
+        }
+      });
+
+      $("btnDisconnect").addEventListener("click", async () => {
+        try {
+          await disconnect();
+        } catch (e) {
+          log({ error: e?.message || String(e) });
+        }
+      });
+
+      $("btnRefresh").addEventListener("click", async () => {
+        try {
+          await refresh();
+        } catch (e) {
+          log({ error: e?.message || String(e) });
+        }
+      });
+
+      $("btnSwitch").addEventListener("click", async () => {
+        try {
+          await switchChain();
+        } catch (e) {
+          log({ error: e?.message || String(e) });
+        }
+      });
+
+      $("btnSend").addEventListener("click", async () => {
+        try {
+          await sendTx();
+        } catch (e) {
+          setStatus("Send failed");
+          log({ error: e?.message || String(e) });
+        }
+      });
+
+      $("btnSign").addEventListener("click", async () => {
+        try {
+          await signMessage();
+        } catch (e) {
+          setStatus("Sign failed");
+          log({ error: e?.message || String(e) });
+        }
+      });
+
+      // initial
+      setConnectedUI(false);
+      log(
+        "Ready. 1) Set WC_PROJECT_ID in index.html. 2) Serve over http(s). 3) Click Connect and approve in SafePal."
+      );
+    </script>
+  </body>
+</html>
